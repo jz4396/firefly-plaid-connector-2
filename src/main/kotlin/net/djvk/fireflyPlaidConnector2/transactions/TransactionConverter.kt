@@ -1,5 +1,7 @@
 package net.djvk.fireflyPlaidConnector2.transactions
 
+import net.djvk.fireflyPlaidConnector2.sync.MarketValueService
+
 import io.ktor.http.*
 import net.djvk.fireflyPlaidConnector2.api.firefly.apis.FireflyTransactionId
 import net.djvk.fireflyPlaidConnector2.api.firefly.models.TransactionRead
@@ -347,6 +349,10 @@ class TransactionConverter(
              * Filter out split transactions; we're not going to bother trying to match those up as transfers
              */
             .filter { it.attributes.transactions.size == 1 }
+            /**
+             * Never pair our own market-value adjustments with a Plaid transaction
+             */
+            .filter { !MarketValueService.isMarketValueAdjustment(it.attributes.transactions.first()) }
             /**
              * Filter out transactions of ineligible types
              */

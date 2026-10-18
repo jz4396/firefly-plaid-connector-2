@@ -9,24 +9,31 @@ val jacksonVersion: String by project
 
 plugins {
     id("org.openapi.generator") version "7.7.0"
-    id("org.springframework.boot") version "3.3.2"
-    id("io.spring.dependency-management") version "1.1.6"
+    id("org.springframework.boot") version "3.5.16"
+    id("io.spring.dependency-management") version "1.1.7"
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.spring)
 }
 
 group = "net.djvk"
-version = "1.5.1"
+version = "1.6.0"
 java.sourceCompatibility = JavaVersion.VERSION_17
 
 repositories {
     mavenCentral()
 }
 
+/**
+ * Security overrides on top of the Spring Boot BOM. Each entry pins a transitive dependency to a patched
+ * release that is newer than what Boot 3.5.16 manages. See README "Security" for the CVE list.
+ */
+extra["jackson-bom.version"] = "2.21.7"   // CVE-2026-89425, -89407, -68494, -91777, -91776, -54512/3/4/5 ...
+extra["log4j2.version"] = "2.25.5"        // CVE-2026-49844 (log4j-api is on the classpath via log4j-to-slf4j)
+
 dependencies {
     implementation(libs.bundles.openapi)
-    implementation(libs.ktor.cio)
     implementation(libs.ktor.logging)
+    implementation(libs.ktor.java)
     implementation("org.springframework.boot:spring-boot-starter")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
     implementation("org.semver4j:semver4j:5.3.0")
@@ -34,7 +41,7 @@ dependencies {
     testImplementation(libs.ktor.mock)
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
-    testImplementation("org.assertj:assertj-core:3.26.3")
+    testImplementation("org.assertj:assertj-core") // managed by Boot BOM (3.27.7, fixes CVE-2026-24400 XXE)
 }
 
 var generatePlaidClient = tasks.register<org.openapitools.generator.gradle.plugin.tasks.GenerateTask>("generatePlaidClient") {

@@ -12,6 +12,7 @@ import net.djvk.fireflyPlaidConnector2.constants.IntervalSeconds
 import net.djvk.fireflyPlaidConnector2.constants.TimestampSeconds
 import net.djvk.fireflyPlaidConnector2.transactions.FireflyTransactionDto
 import net.djvk.fireflyPlaidConnector2.transactions.TransactionConverter
+import net.djvk.fireflyPlaidConnector2.util.Redaction
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
@@ -35,6 +36,7 @@ class BatchSyncRunner(
     private val syncDays: Int,
     @Value("\${fireflyPlaidConnector2.batch.setInitialBalance:false}")
     private val setInitialBalance: Boolean,
+    /** Deprecated and ignored: only applied to the paid /accounts/balance/get endpoint, which is no longer called. */
     @Value("\${fireflyPlaidConnector2.batch.balanceMinLastUpdatedDatetimeSeconds:}")
     private val balanceMinLastUpdatedDatetimeSeconds: IntervalSeconds? = null,
     @Value("\${fireflyPlaidConnector2.plaid.batchSize}")
@@ -46,7 +48,8 @@ class BatchSyncRunner(
 
     private val converter: TransactionConverter,
 
-    ) : Runner {
+    private val marketValueService: MarketValueService? = null,
+) : Runner {
     private val logger = LoggerFactory.getLogger(this::class.java)
 
     override fun run() {
@@ -59,7 +62,7 @@ class BatchSyncRunner(
             syncHelper.setApiCreds()
             val (accountMap, accountAccessTokenSequence) = syncHelper.getAllPlaidAccessTokenAccountIdSets()
             for ((accessToken, accountIds) in accountAccessTokenSequence) {
-                logger.debug("Fetching Plaid data for access token $accessToken and account ids ${accountIds.joinToString()}")
+                logger.debug("Fetching Plaid data for access token ${Redaction.fingerprint(accessToken)} and account ids ${accountIds.joinToString()}")
                 var offset = 0
                 do {
                     /**
@@ -95,13 +98,19 @@ class BatchSyncRunner(
                     )
                     val plaidTxs: List<Transaction>
                     try {
-                        plaidTxs = plaidApiWrapper.executeRequest(
-                            { plaidApi -> plaidApi.transactionsGet(request) },
-                            "transaction get request"
-                        ).body().transactions
+                        plaidTxs = plaidApiWrapper.transactionsGet(request).body().transactions
                         logger.debug("\tReceived a batch of ${plaidTxs.size} Plaid transactions")
                     } catch (cre: ClientRequestException) {
-                        logger.error("Error requesting Plaid transactions. Request: $request; ")
+                        logger.error(
+                            "Error requesting Plaid transactions for access token ${Redaction.fingerprint(accessToken)}, " +
+                                    "account ids ${accountIds.joinToString()}, $startDate to $endDate, offset $offset"
+                        )
+                        if (marketValueService?.isMarketOnlyAccessToken(accessToken) == true) {
+                            // Investment-only items (e.g. a brokerage) may not support Transactions; the market-value
+                            //  switch is their update path, so don't let this abort the whole run.
+                            logger.warn("Continuing: all accounts on this item use valuation: market")
+                            break
+                        }
                         throw cre
                     }
                     allPlaidTxs
@@ -119,7 +128,7 @@ class BatchSyncRunner(
 
                     // Keep going until we get all the transactions
                 } while (plaidTxs.size == plaidBatchSize)
-                logger.debug("Done fetching Plaid data for access token $accessToken and account ids ${accountIds.joinToString()}")
+                logger.debug("Done fetching Plaid data for access token ${Redaction.fingerprint(accessToken)} and account ids ${accountIds.joinToString()}")
             }
 
             // Map Plaid transactions to Firefly transactions
@@ -132,6 +141,9 @@ class BatchSyncRunner(
             if (setInitialBalance) {
                 setInitialBalances(allPlaidTxs, syncHelper, startDate)
             }
+
+            // Market-value adjustments for accounts configured with `valuation: market`
+            marketValueService?.run()
         }
     }
 
@@ -146,27 +158,16 @@ class BatchSyncRunner(
         for ((accessToken, accountIds) in accountAccessTokenSequence) {
             val plaidTxs = allPlaidTxs[accessToken] ?: continue
             // Request balance data for this item/access token
-            logger.debug("Requesting balances for access token $accessToken and account ids ${accountIds.joinToString()}")
-            // Calculate min last updated, if required
-            val minLastUpdated = balanceMinLastUpdatedDatetimeSeconds?.let {
-                logger.debug("Setting min_last_updated_datetime to $balanceMinLastUpdatedDatetimeSeconds seconds ago")
-                OffsetDateTime.now().minusSeconds(it)
-            }
+            // Uses the free, cached /accounts/get balance. The paid /accounts/balance/get endpoint is never called.
+            logger.debug("Requesting cached balances for access token ${Redaction.fingerprint(accessToken)} and account ids ${accountIds.joinToString()}")
             val balances: AccountsGetResponse
             try {
-                balances = plaidApiWrapper.executeRequest(
-                    { plaidApi ->
-                        plaidApi.accountsBalanceGet(
-                            AccountsBalanceGetRequest(
-                                accessToken, null, null, AccountsBalanceGetRequestOptions(accountIds, minLastUpdated)
-                            )
-                        )
-                    },
-                    "transaction get request"
+                balances = plaidApiWrapper.accountsGet(
+                    AccountsGetRequest(accessToken, options = AccountsGetRequestOptions(accountIds))
                 ).body()
             } catch (e: Exception) {
                 logger.error(
-                    "Failed to fetch balances for access token $accessToken and account ids ${accountIds.joinToString()}",
+                    "Failed to fetch balances for access token ${Redaction.fingerprint(accessToken)} and account ids ${accountIds.joinToString()}",
                     e
                 )
                 continue

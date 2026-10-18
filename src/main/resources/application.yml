@@ -39,8 +39,8 @@ fireflyPlaidConnector2:
   batch:
     # The number of days in the past to pull data for.
     maxSyncDays: 5
-    # NOTE: Given that the balance endpoint is now $0.10 per call, this feature isn't really worth using anymore
-    # and is no longer officially supported because it costs me money every time I want to QA a change to it.
+    # NOTE: As of v1.6.0 this uses the free, cached balance from Plaid's accounts get endpoint (never the paid
+    # real-time balance endpoint), so the balance may be up to about a day old.
     # If set to true, we will insert an offsetting transaction at the beginning of the batch pull window so
     #   that the total amount of all transactions pulled plus the offsetting transaction equals the current
     #   balance in the account as reported by Plaid.
@@ -48,11 +48,8 @@ fireflyPlaidConnector2:
     #   pull every transaction from the beginning of time.
     # Defaults to false.
     setInitialBalance: false
-    # The number of seconds in the past to use as min_last_updated_datetime in the Plaid /accounts/balance/get call
-    # https://plaid.com/docs/api/products/balance/#accounts-balance-get-request-options-min-last-updated-datetime
-    # Note that this field is only used for Capital One non-depository accounts.
-    # Every other account type can safely ignore this.
-    # Defaults to null
+    # DEPRECATED and ignored as of v1.6.0 (it only applied to the paid real-time balance endpoint, which is no longer
+    # called).
 #    balanceMinLastUpdatedDatetimeSeconds: 86400
   firefly:
 #    url: https://firefly.yourdomain.com
@@ -148,6 +145,16 @@ fireflyPlaidConnector2:
       # You can retrieve this id from https://plaid.com/docs/api/accounts/#accountsget using an
       #   Item's access token after you've set it up.
 #      plaidAccountId: omgwtfbbq
+      # Optional market-value switch (default off). See README "Market-Value Switch" and
+      #   samples/market-value-config.sample.yml.
+#      valuation: market
+#      adjustmentThreshold: 1.00
+#      gainLossAccountId: 900
+#      gainAccountId: 902
+#      lossAccountId: 901
+  # Optional HTTP client logging: NONE (default) or HEADERS. Request/response bodies are never logged because they
+  #   contain Plaid access tokens; sensitive headers are redacted.
+  httpLogLevel: NONE
   product:
     name: Firefly Plaid Connector 2
 logging:

@@ -48,12 +48,13 @@ transaction to a Firefly transfer, the existing Firefly transaction will be dele
 transaction will be created because the Firefly API does not support converting existing transaction types.
 
 ## Initial Balances
-**Note**: Given that the balance endpoint is now $0.10 per call, this feature isn't really worth using anymore
-and is no longer officially supported because it costs me money every time I want to QA a change to it.
+**Note (v1.6.0)**: this feature now uses the free, cached `/accounts/get` balance instead of the paid
+`/accounts/balance/get` endpoint (see [No paid Plaid calls](#no-paid-plaid-calls)). The balance may therefore be up to
+about a day old. `batch.balanceMinLastUpdatedDatetimeSeconds` is ignored.
 
 If `fireflyPlaidConnector2.batch.setInitialBalance` is set to `true`, the connector will try to create "initial balance"
 transactions for each Firefly account that result in the current Firefly balance for each account equalling the
-current balance that [Plaid reports](https://plaid.com/docs/api/products/balance/#accountsbalanceget) for that account.
+current balance that [Plaid reports (cached)](https://plaid.com/docs/api/accounts/#accountsget) for that account.
 This is determined by summing up all transactions pulled during
 this run for that account, then subtracting that from the Plaid-reported current balance to get the amount for the 
 "initial balance" transaction.
@@ -68,17 +69,87 @@ Because the initial balance transaction amount is determined from the transactio
 recommend enabling this feature unless you're pulling all of the transactions you intend to backfill for a given
 account (as opposed to just filling in some gaps).
 
-Note that the [Plaid balance endpoint](https://plaid.com/docs/api/products/balance/#accountsbalanceget)
-(or the underlying institution data source) is kind of crappy. To wit:
-* There is a `lastUpdatedDatetime` field in the response schema, but according to the Plaid documentation it's only
-populated for Capital One for whatever reason,
-and due to that it's impossible to tell exactly what point in time the Plaid balance represents.
-  * The upshot of this is that if the Plaid balance is out of date by a transaction or two,
-  the "initial balance" transaction amount will also be a bit off. Plan accordingly.
-* According to the docs, the Plaid balance endpoint forces a synchronous update from the underlying institution data
-source, which can cause this part of the connector's run to take a while. The Plaid API timeout has been
-[adjusted](https://github.com/dvankley/firefly-plaid-connector-2/blob/a73fb692937984b64af34a8047c05fcef03cc088/src/main/kotlin/net/djvk/fireflyPlaidConnector2/api/ApiConfiguration.kt#L29)
-to account for this, but it still fails with surprising regularity.
+Note that the cached Plaid balance reflects the last time Plaid refreshed the Item (typically about once a day), so
+if it is behind by a transaction or two the "initial balance" amount will be a bit off. Plan accordingly.
+
+## Market-Value Switch (v1.6.0)
+Some accounts (brokerages, HSAs) get no Plaid transactions, so syncing transactions never moves their Firefly balance.
+Set `valuation: market` on such an account and, after each sync (batch run or polled cycle), the connector:
+
+1. reads the account's **cached** Plaid balance via `/accounts/get` (free), summing every Plaid account mapped to
+   the same Firefly account (e.g. an HSA that Plaid splits into cash + investment accounts);
+2. reads the Firefly balance, excluding today's existing adjustment if there is one;
+3. posts **one** adjustment = Plaid value − Firefly balance:
+   * gain: a deposit from `gainAccountId` (or `gainLossAccountId`), which must be a Firefly **revenue** account;
+   * loss: a withdrawal to `lossAccountId` (a Firefly **expense** account). If no `lossAccountId` is set, the
+     withdrawal goes to an expense account with the same name as the `gainLossAccountId` revenue account (Firefly
+     finds or creates it), because Firefly does not allow a revenue account as a withdrawal destination.
+
+Details:
+* Default off. Accounts without `valuation: market` behave exactly as before.
+* Idempotent per day: the adjustment is tagged `ffpc-market-value` and has external id
+  `ffpc-mv-<fireflyAccountId>-<YYYY-MM-DD>` (run date in `timeZone`). A rerun the same day updates that adjustment
+  (or replaces it if it flips between gain and loss, or deletes it if the delta is now below the threshold) instead
+  of adding another one. A new day gets a new adjustment for that day's change.
+* Dated by Plaid's `balances.last_updated_datetime` when every summed account has one, otherwise the sync time.
+* `adjustmentThreshold` (optional): skip when |delta| is below it. Default: skip only when the delta rounds to 0.00.
+* Real transactions are never modified. Only transactions carrying both the tag and the `ffpc-mv-` external id are
+  ever updated or deleted, they are created with Firefly rules disabled, and they are excluded from transfer matching.
+* If any summed Plaid account has no cached balance, the account is skipped rather than adjusted from a partial sum.
+* Works for accounts with zero transactions. In batch mode, if `/transactions/get` fails for an item whose accounts
+  are all market-valued (e.g. an investments-only item), the run logs a warning and continues. In polled mode use
+  `polled.allowItemToFail: true` for such items.
+* Plaid's cached balance for investment accounts typically refreshes about once a day.
+
+See [samples/market-value-config.sample.yml](samples/market-value-config.sample.yml):
+
+```yaml
+  accounts:
+    - fireflyAccountId: 49                # Schwab brokerage
+      plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000002
+      plaidAccountId: FAKE_SCHWAB_ACCOUNT_ID
+      valuation: market
+      adjustmentThreshold: 1.00
+      gainLossAccountId: 900              # revenue account "Unrealized gains/losses"
+      lossAccountId: 901                  # optional expense account for losses
+    - fireflyAccountId: 50                # HSA = cash + investments, summed
+      plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000003
+      plaidAccountId: FAKE_HSA_CASH_ACCOUNT_ID
+      valuation: market
+      gainLossAccountId: 900
+    - fireflyAccountId: 50
+      plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000003
+      plaidAccountId: FAKE_HSA_INVESTMENT_ACCOUNT_ID
+```
+
+## No Paid Plaid Calls
+The connector only ever calls these Plaid endpoints:
+
+| Endpoint | Why it's allowed |
+|---|---|
+| `/transactions/get` | Transactions subscription, not billed per call (batch mode) |
+| `/transactions/sync` | Transactions subscription, not billed per call (polled mode) |
+| `/accounts/get` | Free; returns the cached balance (market-value switch, initial balances) |
+
+`/accounts/balance/get`, every `/investments/*` endpoint, `/transactions/refresh` and every other Plaid product are
+never called. This is enforced in code: `PlaidEndpointPolicy` holds the allowlist, `PlaidApiWrapper` is the only class
+that talks to Plaid and only exposes those three calls, and an HTTP client plugin rejects any other Plaid path before
+it reaches the network. `PlaidEndpointPolicyTest` fails the build if a non-allowlisted endpoint is referenced anywhere
+in `src/main` or if the wrapper can be made to call one.
+
+## Log Redaction
+Plaid access tokens, the Plaid client id and secret, and the Firefly personal access token never appear in logs, even
+at DEBUG:
+* Call sites log a non-reversible fingerprint (`token#3f9a1c2b`) instead of an access token, and no longer dump
+  Plaid request objects.
+* `AccountConfig.toString()` hides the access token.
+* `logback-spring.xml` routes every message and stack trace through masking converters that replace every configured
+  secret and anything shaped like a Plaid token, JWT/PAT, bearer header, or `secret=`/`"access_token":` pair. If you
+  supply your own logback config, keep those conversion rules.
+* Optional HTTP client logging (`fireflyPlaidConnector2.httpLogLevel: HEADERS`) never logs bodies and redacts the
+  `Authorization`, `PLAID-SECRET` and `PLAID-CLIENT-ID` headers.
+
+`LogRedactionTest` runs a batch sync at DEBUG with fake secrets and fails if any of them shows up.
 
 # Configuration
 ## Plaid
@@ -246,9 +317,12 @@ These are basic instructions for installing and running the connector. You will 
 
 ## Running via Docker
 New versions of the Docker image are pushed to GHCR with each release.
-The latest version is available at `ghcr.io/dvankley/firefly-plaid-connector-2:latest`.
+The latest upstream version is available at `ghcr.io/dvankley/firefly-plaid-connector-2:latest`.
 
-You can also build your own with `./gradlew bootBuildImage --imageName=your-docker-registry/firefly-plaid-connector-2`.
+Build your own from the hardened `Dockerfile` with `docker build -t firefly-plaid-connector-2 .` (or
+`docker compose build`). The image is multi-stage, uses digest-pinned base images, a minimal jlink'd JRE on distroless,
+runs as non-root uid `65532`, and contains no configuration or secrets: mount your `application.yml` at runtime.
+In polled mode the cursor directory must be writable by uid 65532 (e.g. `chown 65532:65532 /path/to/cursors`).
 
 ### Docker Compose
 1. Pull down the [docker-compose-polled.yml](https://raw.githubusercontent.com/dvankley/firefly-plaid-connector-2/main/docker-compose-polled.yml) and/or
@@ -280,7 +354,7 @@ The example below uses bind mounts for these purposes for
 simplicity, but you can also use volumes if you want.
 If using volumes you will need to use an intermediate container
 to write the application configuration file to a volume, as well as setting permissions to allow the
-application user `cnb` to write to the cursor file directory's volume.
+application user (uid `65532`) to write to the cursor file directory's volume.
 
 #### Example Docker Run Command
 ```shell

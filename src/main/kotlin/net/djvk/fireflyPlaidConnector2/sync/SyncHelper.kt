@@ -13,6 +13,7 @@ import net.djvk.fireflyPlaidConnector2.config.properties.AccountConfigs
 import net.djvk.fireflyPlaidConnector2.transactions.FireflyAccountId
 import net.djvk.fireflyPlaidConnector2.transactions.FireflyTransactionDto
 import net.djvk.fireflyPlaidConnector2.versionManagement.VersionComparison
+import net.djvk.fireflyPlaidConnector2.util.Redaction
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
@@ -33,6 +34,11 @@ class SyncHelper(
     private val fireflyAccountsApi: AccountsApi,
 ) {
     private val logger = LoggerFactory.getLogger(this::class.java)
+
+    init {
+        Redaction.registerSecret(fireflyAccessToken)
+        plaidAccountsConfig.accounts.forEach { Redaction.registerSecret(it.plaidItemAccessToken) }
+    }
 
     suspend fun setApiCreds() {
         // Spring components are singletons by default, so this should set these credentials for any other

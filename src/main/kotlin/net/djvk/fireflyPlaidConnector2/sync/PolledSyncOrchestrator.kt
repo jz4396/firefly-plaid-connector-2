@@ -34,6 +34,7 @@ class PolledSyncOrchestrator(
     private val plaidSyncService: PlaidSyncService,
     private val fireflyTransactionService: FireflyTransactionService,
     private val converter: TransactionConverter,
+    private val marketValueService: MarketValueService? = null,
 ) : Runner, DisposableBean {
     private val logger = LoggerFactory.getLogger(this::class.java)
 
@@ -96,6 +97,9 @@ class PolledSyncOrchestrator(
 
         // Update cursor map after successful processing
         cursorManager.writeCursorMap(cursorMap)
+
+        // Market-value adjustments for accounts configured with `valuation: market`
+        marketValueService?.run()
     }
 
     override fun run() {

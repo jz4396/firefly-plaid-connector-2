@@ -1,0 +1,13 @@
+# Keep the build context small and never send local secrets/config to the Docker daemon
+.git
+.gradle
+.idea
+build
+persistence
+/config
+/application*.yml
+*.env
+.env*
+**/*.pem
+**/*.jks
+**/*.p12

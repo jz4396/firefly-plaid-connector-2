@@ -3,7 +3,9 @@ package net.djvk.fireflyPlaidConnector2.sync
 import net.djvk.fireflyPlaidConnector2.api.firefly.apis.AccountsApi
 import net.djvk.fireflyPlaidConnector2.api.firefly.apis.SearchApi
 import net.djvk.fireflyPlaidConnector2.api.firefly.apis.TransactionsApi
+import net.djvk.fireflyPlaidConnector2.api.firefly.models.Account
 import net.djvk.fireflyPlaidConnector2.api.firefly.models.AccountRoleProperty
+import net.djvk.fireflyPlaidConnector2.api.firefly.models.ShortAccountTypeProperty
 import net.djvk.fireflyPlaidConnector2.api.firefly.models.TransactionRead
 import net.djvk.fireflyPlaidConnector2.api.firefly.models.TransactionSplit
 import net.djvk.fireflyPlaidConnector2.api.firefly.models.TransactionTypeProperty
@@ -40,10 +42,16 @@ data class MarketValuePlan(
     /** Every Plaid account mapped to this Firefly account; their balances are summed. */
     val plaidAccounts: List<Pair<PlaidAccessToken, PlaidAccountId>>,
     val threshold: BigDecimal,
+    /** Effective gain offset: `gainAccountId`, or else `gainLossAccountId`. */
     val gainAccountId: FireflyAccountId?,
     val lossAccountId: FireflyAccountId?,
-    /** Revenue account used for losses (by name) when no dedicated [lossAccountId] is configured. */
+    /**
+     * Shared offset. Asset account: used for both gains and losses (transfer mode). Revenue account: used for gains and,
+     *  by name, for losses when no dedicated [lossAccountId] is configured.
+     */
     val gainLossAccountId: FireflyAccountId?,
+    /** Name of the setting [gainAccountId] came from, for config error messages. */
+    val gainAccountSetting: String = if (gainAccountId != null && gainAccountId == gainLossAccountId) "gainLossAccountId" else "gainAccountId",
 ) {
     override fun toString(): String =
         "MarketValuePlan(fireflyAccountId=$fireflyAccountId, plaidAccounts=${plaidAccounts.map { it.second }}, " +
@@ -55,8 +63,34 @@ sealed interface MarketValueOutcome {
 
     data class Created(override val fireflyAccountId: FireflyAccountId, val delta: BigDecimal, val externalId: String) : MarketValueOutcome
     data class Updated(override val fireflyAccountId: FireflyAccountId, val delta: BigDecimal, val externalId: String) : MarketValueOutcome
+    /** Today's adjustment already matches; nothing was written. */
+    data class Unchanged(override val fireflyAccountId: FireflyAccountId, val delta: BigDecimal, val externalId: String) : MarketValueOutcome
     data class Skipped(override val fireflyAccountId: FireflyAccountId, val reason: String) : MarketValueOutcome
     data class Failed(override val fireflyAccountId: FireflyAccountId, val reason: String) : MarketValueOutcome
+}
+
+/** A market-value setting is inconsistent with the Firefly account types it points at. Names the offending setting. */
+class MarketValueConfigException(val setting: String, message: String) : IllegalStateException("$setting: $message")
+
+/**
+ * How adjustments are posted for one market-valued account, resolved from the Firefly types of its offset accounts.
+ */
+sealed interface MarketValueTargets {
+    /**
+     * Offsets are Firefly asset accounts: gain = transfer offset -> market account, loss = transfer market account ->
+     *  offset. Transfers never show up as income or spending in Firefly budgets and reports.
+     */
+    data class Transfer(val gainOffsetId: FireflyAccountId, val lossOffsetId: FireflyAccountId) : MarketValueTargets
+
+    /**
+     * Legacy mode: gain = deposit from a revenue account; loss = withdrawal to [lossExpenseId], or (when no expense
+     *  account is configured) to an expense account named [lossExpenseName], which Firefly finds or creates.
+     */
+    data class RevenueExpense(
+        val gainRevenueId: FireflyAccountId,
+        val lossExpenseId: FireflyAccountId?,
+        val lossExpenseName: String?,
+    ) : MarketValueTargets
 }
 
 /**
@@ -66,7 +100,8 @@ sealed interface MarketValueOutcome {
  *  1. read the cached Plaid balance via /accounts/get (free; never /accounts/balance/get), summing every Plaid account
  *     mapped to that Firefly account;
  *  2. read the Firefly balance, excluding today's existing adjustment (if any);
- *  3. post ONE adjustment = Plaid value - Firefly balance against the gain (revenue) or loss account.
+ *  3. post ONE adjustment = Plaid value - Firefly balance against the configured offset account(s): a transfer when
+ *     the offsets are asset accounts (recommended), otherwise a deposit from a revenue / withdrawal to an expense account.
  *
  * Idempotent per day: the adjustment carries tag [MARKET_VALUE_TAG] and external id
  *  `ffpc-mv-<fireflyAccountId>-<YYYY-MM-DD>` (the run date in the configured time zone), so a same-day rerun updates
@@ -94,6 +129,61 @@ class MarketValueService(
     companion object {
         val DEFAULT_THRESHOLD: BigDecimal = BigDecimal("0.005")
         private const val SEARCH_PAGE_MAX = 5
+        private val TRANSFER_CAPABLE = setOf(ShortAccountTypeProperty.asset, ShortAccountTypeProperty.liability, ShortAccountTypeProperty.liabilities)
+
+        /**
+         * Decides how to post adjustments for [plan] from the Firefly types of its offset accounts. Never auto-creates
+         *  anything. Throws [MarketValueConfigException] naming the setting when the configuration is inconsistent.
+         */
+        suspend fun resolveTargets(plan: MarketValuePlan, lookup: suspend (setting: String, id: FireflyAccountId) -> Account): MarketValueTargets {
+            val gainSetting = plan.gainAccountSetting
+            val gainId = plan.gainAccountId
+                ?: throw MarketValueConfigException("gainLossAccountId", "no gain offset account configured for Firefly account ${plan.fireflyAccountId}")
+            val lossSetting = if (plan.lossAccountId != null) "lossAccountId" else "gainLossAccountId"
+            val lossId = plan.lossAccountId ?: plan.gainLossAccountId
+            for ((setting, id) in listOf(gainSetting to gainId, lossSetting to lossId)) {
+                if (id == plan.fireflyAccountId) {
+                    throw MarketValueConfigException(setting, "offset account $id is the market-valued account itself")
+                }
+            }
+            val gainAccount = lookup(gainSetting, gainId)
+            val gainType = gainAccount.type
+            return when (gainType) {
+                ShortAccountTypeProperty.asset -> {
+                    if (lossId == null) {
+                        throw MarketValueConfigException("lossAccountId", "no loss offset configured for Firefly account ${plan.fireflyAccountId}")
+                    }
+                    val lossType = if (lossId == gainId) gainType else lookup(lossSetting, lossId).type
+                    if (lossType != ShortAccountTypeProperty.asset) {
+                        throw MarketValueConfigException(lossSetting, "Firefly account $lossId is a ${lossType.value} account, " +
+                                "but $gainSetting $gainId is an asset account; in transfer mode every offset must be an asset account")
+                    }
+                    MarketValueTargets.Transfer(gainId, lossId)
+                }
+                ShortAccountTypeProperty.revenue -> {
+                    if (plan.lossAccountId != null) {
+                        val lossType = lookup("lossAccountId", plan.lossAccountId).type
+                        if (lossType != ShortAccountTypeProperty.expense) {
+                            throw MarketValueConfigException("lossAccountId", "Firefly account ${plan.lossAccountId} is a ${lossType.value} account, " +
+                                    "but $gainSetting $gainId is a revenue account; with a revenue gain account the loss account must be an expense account")
+                        }
+                        MarketValueTargets.RevenueExpense(gainId, plan.lossAccountId, null)
+                    } else {
+                        val shared = plan.gainLossAccountId
+                            ?: throw MarketValueConfigException("lossAccountId", "no loss account configured for Firefly account " +
+                                    "${plan.fireflyAccountId}; set lossAccountId (expense) or gainLossAccountId (revenue)")
+                        val sharedAccount = if (shared == gainId) gainAccount else lookup("gainLossAccountId", shared)
+                        if (sharedAccount.type != ShortAccountTypeProperty.revenue) {
+                            throw MarketValueConfigException("gainLossAccountId", "Firefly account $shared is a ${sharedAccount.type.value} account, " +
+                                    "but $gainSetting $gainId is a revenue account; set lossAccountId to an expense account or use asset offsets")
+                        }
+                        MarketValueTargets.RevenueExpense(gainId, null, sharedAccount.name)
+                    }
+                }
+                else -> throw MarketValueConfigException(gainSetting, "Firefly account $gainId is a ${gainType.value} account; " +
+                        "it must be an asset account (transfer mode, recommended) or a revenue account")
+            }
+        }
 
         fun externalId(fireflyAccountId: FireflyAccountId, date: LocalDate): String =
             "$MARKET_VALUE_EXTERNAL_ID_PREFIX$fireflyAccountId-${date.format(DateTimeFormatter.ISO_LOCAL_DATE)}"
@@ -137,6 +227,7 @@ class MarketValueService(
                         gainAccountId = gain,
                         lossAccountId = loss,
                         gainLossAccountId = gainLoss,
+                        gainAccountSetting = if (entries.any { it.gainAccountId != null }) "gainAccountId" else "gainLossAccountId",
                     )
                 }
         }
@@ -165,6 +256,9 @@ class MarketValueService(
         return plans.map { plan ->
             try {
                 adjust(plan, balances, runDate)
+            } catch (e: MarketValueConfigException) {
+                logger.error("Market-value config error for Firefly account ${plan.fireflyAccountId}: ${e.message}")
+                MarketValueOutcome.Failed(plan.fireflyAccountId, "config error: ${e.message}")
             } catch (e: Exception) {
                 logger.error("Market-value adjustment failed for Firefly account ${plan.fireflyAccountId}", e)
                 MarketValueOutcome.Failed(plan.fireflyAccountId, e.javaClass.simpleName)
@@ -205,6 +299,12 @@ class MarketValueService(
         var plaidValue = present.fold(BigDecimal.ZERO) { sum, a -> sum + BigDecimal.valueOf(a.balances.current!!) }
 
         val fireflyAccount = fireflyAccountsApi.getAccount(acct.toString(), null).body().data.attributes
+        // Resolve offsets before any write; an inconsistent config never posts anything
+        val targets = resolveTargets(plan) { setting, id -> lookupOffset(setting, id) }
+        if (targets is MarketValueTargets.Transfer && fireflyAccount.type !in TRANSFER_CAPABLE) {
+            throw MarketValueConfigException("fireflyAccountId", "Firefly account $acct is a ${fireflyAccount.type.value} account; " +
+                    "transfer mode needs the market-valued account to be an asset or liability account")
+        }
         if (fireflyAccount.accountRole == AccountRoleProperty.ccAsset) {
             // Plaid reports amounts owed as positive balances
             plaidValue = plaidValue.negate()
@@ -229,21 +329,45 @@ class MarketValueService(
         }
 
         val asOf = asOfTimestamp(present)
-        val split = buildSplit(plan, delta, asOf, externalId, plaidValue, balanceExcludingToday, present.size)
+        val split = buildSplit(plan, targets, delta, asOf, externalId, plaidValue, balanceExcludingToday, present.size)
 
         if (existing == null) {
             fireflyTxApi.storeTransaction(FireflyTransactionDto(null, split).toTransactionStore().copy(errorIfDuplicateHash = false, applyRules = false))
             return MarketValueOutcome.Created(acct, delta, externalId)
         }
         val existingSplit = existing.attributes.transactions.first()
+        if (sameEffect(existingSplit, split)) {
+            return MarketValueOutcome.Unchanged(acct, delta, externalId)
+        }
         if (existingSplit.type == split.type) {
+            // Same type: update in place. For transfers this also covers a gain <-> loss flip (source/destination swap).
             fireflyTxApi.updateTransaction(existing.id, FireflyTransactionDto(existing.id, split).toTransactionUpdate().copy(applyRules = false))
         } else {
-            // Gain <-> loss flip: Firefly can't change a deposit into a withdrawal in place, so replace our own adjustment
+            // Type change (deposit <-> withdrawal flip, or switching between revenue/expense and transfer mode): Firefly
+            //  can't change a transaction's type in place, so replace our own adjustment
             fireflyTxApi.deleteTransaction(existing.id)
             fireflyTxApi.storeTransaction(FireflyTransactionDto(null, split).toTransactionStore().copy(errorIfDuplicateHash = false, applyRules = false))
         }
         return MarketValueOutcome.Updated(acct, delta, externalId)
+    }
+
+    private suspend fun lookupOffset(setting: String, id: FireflyAccountId): Account =
+        try {
+            fireflyAccountsApi.getAccount(id.toString(), null).body().data.attributes
+        } catch (e: Exception) {
+            throw MarketValueConfigException(setting, "could not read Firefly account $id (${e.javaClass.simpleName})")
+        }
+
+    /** True if today's existing adjustment already moves the same amount between the same accounts. */
+    private fun sameEffect(existing: TransactionSplit, wanted: TransactionSplit): Boolean {
+        if (existing.type != wanted.type) return false
+        if (BigDecimal(existing.amount).compareTo(BigDecimal(wanted.amount)) != 0) return false
+        if (existing.sourceId != wanted.sourceId) return false
+        return if (wanted.destinationId != null) {
+            existing.destinationId == wanted.destinationId
+        } else {
+            existing.destinationName == wanted.destinationName
+        }
     }
 
     private suspend fun findExistingAdjustment(externalId: String): TransactionRead? {
@@ -261,12 +385,14 @@ class MarketValueService(
         return matches.firstOrNull()
     }
 
-    /** The effect of an existing adjustment on this account's balance: deposits add, withdrawals subtract. */
+    /** The effect of an existing adjustment on this account's balance: money in adds, money out subtracts. */
     private fun signedAmountFor(acct: FireflyAccountId, split: TransactionSplit): BigDecimal {
         val amount = BigDecimal(split.amount).abs()
         return when {
             split.type == TransactionTypeProperty.deposit && split.destinationId == acct.toString() -> amount
             split.type == TransactionTypeProperty.withdrawal && split.sourceId == acct.toString() -> amount.negate()
+            split.type == TransactionTypeProperty.transfer && split.destinationId == acct.toString() -> amount
+            split.type == TransactionTypeProperty.transfer && split.sourceId == acct.toString() -> amount.negate()
             else -> throw IllegalStateException("Unexpected market-value adjustment shape (type ${split.type})")
         }
     }
@@ -280,8 +406,9 @@ class MarketValueService(
         return if (latest.isAfter(now)) now else latest
     }
 
-    private suspend fun buildSplit(
+    private fun buildSplit(
         plan: MarketValuePlan,
+        targets: MarketValueTargets,
         delta: BigDecimal,
         asOf: OffsetDateTime,
         externalId: String,
@@ -306,27 +433,22 @@ class MarketValueService(
             tags = listOf(MARKET_VALUE_TAG),
             externalId = externalId,
         )
-        return if (delta.signum() > 0) {
-            common.copy(
-                type = TransactionTypeProperty.deposit,
-                sourceId = plan.gainAccountId!!.toString(),
-                destinationId = acct,
-            )
-        } else if (plan.lossAccountId != null) {
-            common.copy(
-                type = TransactionTypeProperty.withdrawal,
-                sourceId = acct,
-                destinationId = plan.lossAccountId.toString(),
-            )
-        } else {
-            // Firefly only allows expense accounts as a withdrawal destination; use an expense account named after the
-            //  gain/loss revenue account (Firefly finds or creates it by name).
-            val revenueName = fireflyAccountsApi.getAccount(plan.gainLossAccountId!!.toString(), null).body().data.attributes.name
-            common.copy(
-                type = TransactionTypeProperty.withdrawal,
-                sourceId = acct,
-                destinationName = revenueName,
-            )
+        val gain = delta.signum() > 0
+        return when (targets) {
+            is MarketValueTargets.Transfer -> if (gain) {
+                common.copy(type = TransactionTypeProperty.transfer, sourceId = targets.gainOffsetId.toString(), destinationId = acct)
+            } else {
+                common.copy(type = TransactionTypeProperty.transfer, sourceId = acct, destinationId = targets.lossOffsetId.toString())
+            }
+            is MarketValueTargets.RevenueExpense -> if (gain) {
+                common.copy(type = TransactionTypeProperty.deposit, sourceId = targets.gainRevenueId.toString(), destinationId = acct)
+            } else if (targets.lossExpenseId != null) {
+                common.copy(type = TransactionTypeProperty.withdrawal, sourceId = acct, destinationId = targets.lossExpenseId.toString())
+            } else {
+                // Legacy: Firefly only allows expense accounts as a withdrawal destination; use an expense account named
+                //  after the gain/loss revenue account (Firefly finds or creates it by name). Never used in transfer mode.
+                common.copy(type = TransactionTypeProperty.withdrawal, sourceId = acct, destinationName = targets.lossExpenseName!!)
+            }
         }
     }
 }

@@ -72,25 +72,45 @@ account (as opposed to just filling in some gaps).
 Note that the cached Plaid balance reflects the last time Plaid refreshed the Item (typically about once a day), so
 if it is behind by a transaction or two the "initial balance" amount will be a bit off. Plan accordingly.
 
-## Market-Value Switch (v1.6.0)
+## Market-Value Switch (v1.6.0+)
 Some accounts (brokerages, HSAs) get no Plaid transactions, so syncing transactions never moves their Firefly balance.
 Set `valuation: market` on such an account and, after each sync (batch run or polled cycle), the connector:
 
 1. reads the account's **cached** Plaid balance via `/accounts/get` (free), summing every Plaid account mapped to
    the same Firefly account (e.g. an HSA that Plaid splits into cash + investment accounts);
 2. reads the Firefly balance, excluding today's existing adjustment if there is one;
-3. posts **one** adjustment = Plaid value − Firefly balance:
-   * gain: a deposit from `gainAccountId` (or `gainLossAccountId`), which must be a Firefly **revenue** account;
-   * loss: a withdrawal to `lossAccountId` (a Firefly **expense** account). If no `lossAccountId` is set, the
-     withdrawal goes to an expense account with the same name as the `gainLossAccountId` revenue account (Firefly
-     finds or creates it), because Firefly does not allow a revenue account as a withdrawal destination.
+3. posts **one** adjustment = Plaid value − Firefly balance against the configured offset account(s).
+
+### Recommended: an asset offset account (v1.6.1+)
+Create one Firefly **asset** account, e.g. "Unrealized gains offset", turn **Include in net worth** off
+(`include_net_worth=false`), and set it as `gainLossAccountId`. Adjustments are then **transfers**, so net worth
+reflects the market-valued account while budgets and income/expense reports ignore the adjustments entirely.
+
+How the adjustment is posted depends on the Firefly type of the configured offset account(s):
+
+| Offset account type(s) | Gain (Plaid value above Firefly) | Loss (Plaid value below Firefly) | Counts as income/spending? |
+|---|---|---|---|
+| `gainLossAccountId` (or `gainAccountId` + `lossAccountId`) are **asset** accounts | transfer offset → market account | transfer market account → offset | No |
+| `gainAccountId`/`gainLossAccountId` **revenue** + `lossAccountId` **expense** | deposit revenue → market account | withdrawal market account → expense | Yes (legacy) |
+| `gainLossAccountId` **revenue**, no `lossAccountId` | deposit revenue → market account | withdrawal to an expense account named like the revenue account (Firefly finds or creates it) | Yes (legacy) |
+
+Account types are read from Firefly on every run; nothing is ever created in transfer mode. An inconsistent setup fails
+that account's adjustment with a config error naming the setting (nothing is written), for example:
+* an asset gain offset with an expense `lossAccountId` (or a revenue `gainLossAccountId` used for losses);
+* a revenue gain account with an asset `lossAccountId`/`gainLossAccountId`;
+* an offset that is an expense, liability or other account type, doesn't exist, or is the market-valued account itself;
+* transfer mode with a market-valued account that isn't an asset or liability account.
+
+Missing offsets (no `gainLossAccountId`/`gainAccountId`, or no loss target at all) are rejected at startup.
 
 Details:
 * Default off. Accounts without `valuation: market` behave exactly as before.
 * Idempotent per day: the adjustment is tagged `ffpc-market-value` and has external id
-  `ffpc-mv-<fireflyAccountId>-<YYYY-MM-DD>` (run date in `timeZone`). A rerun the same day updates that adjustment
-  (or replaces it if it flips between gain and loss, or deletes it if the delta is now below the threshold) instead
-  of adding another one. A new day gets a new adjustment for that day's change.
+  `ffpc-mv-<fireflyAccountId>-<YYYY-MM-DD>` (run date in `timeZone`). A rerun the same day updates that adjustment in
+  place instead of adding another one; a rerun with no change writes nothing. A transfer that flips between gain and
+  loss is updated in place (source and destination swapped). A deposit/withdrawal flip, or a change between legacy
+  and transfer mode, replaces the adjustment, because Firefly can't change a transaction's type. If the delta is now
+  below the threshold, today's adjustment is deleted. A new day gets a new adjustment for that day's change.
 * Dated by Plaid's `balances.last_updated_datetime` when every summed account has one, otherwise the sync time.
 * `adjustmentThreshold` (optional): skip when |delta| is below it. Default: skip only when the delta rounds to 0.00.
 * Real transactions are never modified. Only transactions carrying both the tag and the `ffpc-mv-` external id are
@@ -101,23 +121,30 @@ Details:
   `polled.allowItemToFail: true` for such items.
 * Plaid's cached balance for investment accounts typically refreshes about once a day.
 
+### Migrating from revenue/expense mode (v1.6.0) to an asset offset
+1. Create the asset offset account (include in net worth: off) and set `gainLossAccountId` to it. Remove any
+   `gainAccountId`/`lossAccountId` that point at revenue/expense accounts (or point both at asset accounts).
+2. Existing adjustments from earlier days stay as they are (deposits/withdrawals); the connector never rewrites them.
+   Reclassify or delete them in Firefly yourself if you want past reports cleaned up.
+3. From the next run on, each day's adjustment is a transfer. If an adjustment for the same day was already posted in
+   revenue/expense mode, that one adjustment is replaced by a transfer (same external id and tag).
+
 See [samples/market-value-config.sample.yml](samples/market-value-config.sample.yml):
 
 ```yaml
   accounts:
-    - fireflyAccountId: 49                # Schwab brokerage
+    - fireflyAccountId: 101               # brokerage
       plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000002
-      plaidAccountId: FAKE_SCHWAB_ACCOUNT_ID
+      plaidAccountId: FAKE_BROKERAGE_ACCOUNT_ID
       valuation: market
       adjustmentThreshold: 1.00
-      gainLossAccountId: 900              # revenue account "Unrealized gains/losses"
-      lossAccountId: 901                  # optional expense account for losses
-    - fireflyAccountId: 50                # HSA = cash + investments, summed
+      gainLossAccountId: 900              # ASSET account "Unrealized gains offset", include_net_worth=false
+    - fireflyAccountId: 102               # HSA = cash + investments, summed
       plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000003
       plaidAccountId: FAKE_HSA_CASH_ACCOUNT_ID
       valuation: market
       gainLossAccountId: 900
-    - fireflyAccountId: 50
+    - fireflyAccountId: 102
       plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000003
       plaidAccountId: FAKE_HSA_INVESTMENT_ACCOUNT_ID
 ```

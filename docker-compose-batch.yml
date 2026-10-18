@@ -3,7 +3,7 @@ version: '3.8'
 services:
   app:
     # Build locally from the hardened Dockerfile (`docker compose build`), or point at a published image.
-    image: firefly-plaid-connector-2:1.6.0
+    image: firefly-plaid-connector-2:1.6.1
     build: .
     # Runs as non-root uid 65532 (distroless nonroot). Hardening:
     read_only: true

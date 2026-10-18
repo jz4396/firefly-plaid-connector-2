@@ -6,6 +6,7 @@ import net.djvk.fireflyPlaidConnector2.api.plaid.PlaidTransactionId
 import net.djvk.fireflyPlaidConnector2.api.plaid.models.TransactionsSyncRequest
 import net.djvk.fireflyPlaidConnector2.api.plaid.models.TransactionsSyncRequestOptions
 import net.djvk.fireflyPlaidConnector2.api.plaid.models.TransactionsSyncResponse
+import net.djvk.fireflyPlaidConnector2.util.Redaction
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
@@ -58,14 +59,11 @@ class PlaidSyncService(
     ): TransactionsSyncResponse? {
         val request = getTransactionSyncRequest(accessToken, cursor, batchSize)
         try {
-            return plaidApiWrapper.executeRequest(
-                { plaidApi -> plaidApi.transactionsSync(request) },
-                "transaction sync request"
-            ).body()
+            return plaidApiWrapper.transactionsSync(request).body()
         } catch (cre: ClientRequestException) {
-            logger.error("Error requesting Plaid transactions. Request: $request; ")
+            logger.error("Error requesting Plaid transactions for access token ${Redaction.fingerprint(accessToken)} (cursor present: ${cursor != null})")
             if (allowItemToFail) {
-                logger.warn("Querying transactions for access token $accessToken failed, allowing failure and continuing on to the next access token")
+                logger.warn("Querying transactions for access token ${Redaction.fingerprint(accessToken)} failed, allowing failure and continuing on to the next access token")
                 return null
             } else throw cre
         }
@@ -85,7 +83,7 @@ class PlaidSyncService(
 
         accessTokenLoop@ for ((accessToken, accountIds) in accountAccessTokenSequence) {
             logger.debug(
-                "Querying Plaid transaction sync endpoint for access token $accessToken " +
+                "Querying Plaid transaction sync endpoint for access token ${Redaction.fingerprint(accessToken)} " +
                         " and account ids ${accountIds.joinToString("; ")}"
             )
             val accountIdSet = accountIds.toSet()
@@ -102,7 +100,7 @@ class PlaidSyncService(
 
                 cursorMap[accessToken] = response.nextCursor
                 logger.debug(
-                    "Received batch of sync updates for access token $accessToken: " +
+                    "Received batch of sync updates for access token ${Redaction.fingerprint(accessToken)}: " +
                             "${response.added.size} created; ${response.modified.size} updated; " +
                             "${response.removed.size} deleted; next cursor ${response.nextCursor}"
                 )
@@ -134,7 +132,7 @@ class PlaidSyncService(
         cursorCatchupLoop@ for ((accessToken, _) in accountAccessTokenSequence) {
             // If we already have a cursor for this access token, then move on
             if (cursorMap.contains(accessToken)) {
-                logger.debug("Cursor map contains $accessToken, skipping initialization for it")
+                logger.debug("Cursor map contains ${Redaction.fingerprint(accessToken)}, skipping initialization for it")
                 continue
             }
 
@@ -145,7 +143,7 @@ class PlaidSyncService(
                     executeTransactionSyncRequest(accessToken, cursorMap[accessToken], plaidBatchSize)
                         ?: continue@cursorCatchupLoop
                 logger.debug(
-                    "Received initial batch of sync updates for access token $accessToken. " +
+                    "Received initial batch of sync updates for access token ${Redaction.fingerprint(accessToken)}. " +
                             "Updating cursor map to next cursor: ${response.nextCursor}"
                 )
                 if (response.nextCursor.isNotBlank()) {

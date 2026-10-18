@@ -1,0 +1,40 @@
+# Sample config for the market-value switch (v1.6.0+). ALL VALUES ARE FAKE PLACEHOLDERS.
+# Merge the relevant parts into your own application.yml; never commit real tokens.
+fireflyPlaidConnector2:
+  syncMode: batch
+  timeZone: America/New_York
+  firefly:
+    url: https://firefly.example.com
+    personalAccessToken: FAKE_FIREFLY_PAT
+  plaid:
+    url: https://production.plaid.com
+    clientId: FAKE_PLAID_CLIENT_ID
+    secret: FAKE_PLAID_SECRET
+  accounts:
+    # A normal transaction-synced account: unchanged behavior (valuation defaults to "transactions")
+    - fireflyAccountId: 1
+      plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000001
+      plaidAccountId: FAKE_CHECKING_ACCOUNT_ID
+
+    # Schwab brokerage: no Plaid transactions, so the market-value switch is its only update path.
+    # After each sync, ONE adjustment = Plaid cached balance - Firefly balance is posted (or updated) for today.
+    - fireflyAccountId: 49
+      plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000002
+      plaidAccountId: FAKE_SCHWAB_ACCOUNT_ID
+      valuation: market
+      adjustmentThreshold: 1.00        # optional; skip when |delta| < 1.00 (default: skip only a 0.00 delta)
+      gainLossAccountId: 900           # Firefly REVENUE account, e.g. "Unrealized gains/losses"
+      # gainAccountId: 902             # optional dedicated revenue account for gains
+      # lossAccountId: 901             # optional dedicated EXPENSE account for losses (recommended)
+
+    # HSA that Plaid reports as two accounts (cash + investments): map both to ONE Firefly account.
+    # Their balances are summed. Market settings only need to appear on one entry (if repeated they must match).
+    - fireflyAccountId: 50
+      plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000003
+      plaidAccountId: FAKE_HSA_CASH_ACCOUNT_ID
+      valuation: market
+      gainLossAccountId: 900
+      lossAccountId: 901
+    - fireflyAccountId: 50
+      plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000003
+      plaidAccountId: FAKE_HSA_INVESTMENT_ACCOUNT_ID

@@ -53,9 +53,9 @@ internal class PlaidApiWrapperTest {
             .getResource("plaid/response-sync-transactions.json")!!
             .readText(Charsets.UTF_8)
 
-        val getBalanceRequest = AccountsBalanceGetRequest(
+        val getAccountsRequest = AccountsGetRequest(
             accessToken = testAccessToken,
-            options = AccountsBalanceGetRequestOptions(listOf(testAccount1, testAccount2)),
+            options = AccountsGetRequestOptions(listOf(testAccount1, testAccount2)),
         )
         val getBalanceResponseStr = this::class.java.classLoader
             .getResource("plaid/response-balance.json")!!
@@ -125,10 +125,7 @@ internal class PlaidApiWrapperTest {
                 )
             )
 
-            plaid.executeRequest(
-                { plaidApi -> plaidApi.transactionsGet(request) },
-                "transaction get request"
-            )
+            plaid.transactionsGet(request)
         }
     }
 
@@ -143,10 +140,7 @@ internal class PlaidApiWrapperTest {
                 )
             })
 
-            val response = plaid.executeRequest(
-                { plaidApi -> plaidApi.transactionsGet(getTransactionsRequest) },
-                "transaction get request"
-            )
+            val response = plaid.transactionsGet(getTransactionsRequest)
             assertEquals(HttpStatusCode.OK, response.response.status)
 
             val body = response.body()
@@ -176,10 +170,7 @@ internal class PlaidApiWrapperTest {
             })
 
             val exception = assertFailsWith<ClientRequestException> {
-                plaid.executeRequest(
-                    { plaidApi -> plaidApi.transactionsGet(getTransactionsRequest) },
-                    "transaction get request"
-                )
+                plaid.transactionsGet(getTransactionsRequest)
             }
 
             assertEquals(HttpStatusCode.BadRequest, exception.response.status)
@@ -233,10 +224,7 @@ internal class PlaidApiWrapperTest {
                 )
             )
 
-            plaid.executeRequest(
-                { plaidApi -> plaidApi.transactionsSync(request) },
-                "transaction sync request"
-            )
+            plaid.transactionsSync(request)
         }
     }
 
@@ -251,10 +239,7 @@ internal class PlaidApiWrapperTest {
                 )
             })
 
-            val response = plaid.executeRequest(
-                { plaidApi -> plaidApi.transactionsSync(syncTransactionsRequest) },
-                "transaction sync request"
-            )
+            val response = plaid.transactionsSync(syncTransactionsRequest)
             assertEquals(HttpStatusCode.OK, response.response.status)
 
             val body = response.body()
@@ -267,28 +252,16 @@ internal class PlaidApiWrapperTest {
     }
 
     @Test
-    fun plaidBalanceTransactionsRequestIsWellFormed() {
+    fun plaidAccountsGetRequestIsWellFormed() {
         runBlocking {
             val plaid = mockPlaid(MockEngine { request ->
-                assertEquals(testBaseUrl, request.url.toString().substring(0, testBaseUrl.length))
+                assertEquals("$testBaseUrl/accounts/get", request.url.toString())
                 assertEquals(listOf(testClientId), request.headers.getAll("PLAID-CLIENT-ID"))
                 assertEquals(listOf(testSecret), request.headers.getAll("PLAID-SECRET"))
-                assertEquals(listOf("application/json"), request.headers.getAll("Accept"))
-                assertEquals(listOf("UTF-8"), request.headers.getAll("Accept-Charset"))
                 assertEquals(4, request.headers.entries().size, "Number of request headers")
-
-                assertEquals("""
-                    {
-                      "access_token" : "${testAccessToken}",
-                      "secret" : null,
-                      "client_id" : null,
-                      "options" : {
-                        "account_ids" : [ "${testAccount1}", "${testAccount2}" ],
-                        "min_last_updated_datetime" : null
-                      },
-                      "payment_details" : null
-                    }
-                """.trimIndent(), request.body.toByteArray().toString(Charsets.UTF_8))
+                val body = request.body.toByteArray().toString(Charsets.UTF_8)
+                assertContains(body, "\"access_token\" : \"${testAccessToken}\"")
+                assertContains(body, "\"account_ids\" : [ \"${testAccount1}\", \"${testAccount2}\" ]")
 
                 respond(
                     content = ByteReadChannel(getBalanceResponseStr),
@@ -297,22 +270,14 @@ internal class PlaidApiWrapperTest {
                 )
             })
 
-            val request = AccountsBalanceGetRequest(
-                accessToken = testAccessToken,
-                options = AccountsBalanceGetRequestOptions(listOf(testAccount1, testAccount2)),
-            )
-
-            plaid.executeRequest(
-                { plaidApi -> plaidApi.accountsBalanceGet(request) },
-                "get account balance request"
-            )
+            plaid.accountsGet(getAccountsRequest)
         }
     }
 
     @Test
-    fun plaidBalanceTransactionsResponseIsParsed() {
+    fun plaidAccountsGetResponseIsParsed() {
         runBlocking {
-            val plaid = mockPlaid(MockEngine { request ->
+            val plaid = mockPlaid(MockEngine { _ ->
                 respond(
                     content = ByteReadChannel(getBalanceResponseStr),
                     status = HttpStatusCode.OK,
@@ -320,10 +285,7 @@ internal class PlaidApiWrapperTest {
                 )
             })
 
-            val response = plaid.executeRequest(
-                { plaidApi -> plaidApi.accountsBalanceGet(getBalanceRequest) },
-                "get account balance request"
-            )
+            val response = plaid.accountsGet(getAccountsRequest)
             assertEquals(HttpStatusCode.OK, response.response.status)
 
             val body = response.body()

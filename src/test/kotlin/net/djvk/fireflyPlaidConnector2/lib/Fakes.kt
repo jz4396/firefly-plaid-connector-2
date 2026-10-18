@@ -31,7 +31,45 @@ class FakeFirefly {
     val accounts = mutableMapOf<Int, FakeAccount>()
     val transactions = linkedMapOf<String, TransactionSplit>()
     val log = mutableListOf<String>()
+    /** Expense accounts Firefly would have found-or-created by name (withdrawal with only a destination name). */
+    val autoCreatedExpenseNames = mutableListOf<String>()
     private var nextId = 1
+
+    private val assetLike = setOf(ShortAccountTypeProperty.asset, ShortAccountTypeProperty.liability, ShortAccountTypeProperty.liabilities)
+    private fun typeOf(id: String?) = id?.toIntOrNull()?.let { accounts[it]?.type }
+
+    /**
+     * Firefly's account-type rules for a transaction, checked for market-value adjustments (the only transactions the
+     *  connector writes with account ids on both sides): deposit = revenue -> asset/liability, withdrawal =
+     *  asset/liability -> expense (or an expense account by name, which Firefly finds or creates), transfer =
+     *  asset/liability -> a different asset/liability.
+     */
+    private fun checkFireflyRules(split: TransactionSplit) {
+        if (split.externalId?.startsWith("ffpc-mv-") != true) return
+        val src = typeOf(split.sourceId)
+        val dst = typeOf(split.destinationId)
+        when (split.type) {
+            TransactionTypeProperty.deposit -> require(src == ShortAccountTypeProperty.revenue && dst in assetLike) {
+                "Firefly rejects deposit from $src to $dst"
+            }
+            TransactionTypeProperty.withdrawal -> {
+                require(src in assetLike) { "Firefly rejects withdrawal from $src" }
+                if (split.destinationId != null) {
+                    require(dst == ShortAccountTypeProperty.expense) { "Firefly rejects withdrawal to $dst" }
+                } else {
+                    val name = split.destinationName ?: error("Firefly rejects withdrawal without a destination")
+                    if (accounts.values.none { it.type == ShortAccountTypeProperty.expense && it.name == name }) {
+                        autoCreatedExpenseNames += name
+                        log += "auto-create expense $name"
+                    }
+                }
+            }
+            TransactionTypeProperty.transfer -> require(src in assetLike && dst in assetLike && split.sourceId != split.destinationId) {
+                "Firefly rejects transfer from $src ${split.sourceId} to $dst ${split.destinationId}"
+            }
+            else -> error("Unexpected transaction type ${split.type}")
+        }
+    }
 
     fun addAccount(id: Int, name: String, opening: String = "0", role: AccountRoleProperty? = AccountRoleProperty.defaultAsset,
                    type: ShortAccountTypeProperty = ShortAccountTypeProperty.asset) {
@@ -70,6 +108,7 @@ class FakeFirefly {
     val transactionsApi = object : TransactionsApi("https://firefly.test", noNetwork) {
         override suspend fun storeTransaction(transactionStore: TransactionStore): HttpResponse<TransactionSingle> {
             val split = transactionStore.transactions.single()
+            checkFireflyRules(split)
             val id = (nextId++).toString()
             transactions[id] = split
             log += "store $id ${split.externalId}"
@@ -85,6 +124,7 @@ class FakeFirefly {
                 destinationId = u.destinationId ?: old.destinationId, destinationName = u.destinationName ?: old.destinationName,
                 notes = u.notes ?: old.notes, tags = u.tags ?: old.tags, externalId = u.externalId ?: old.externalId,
             )
+            checkFireflyRules(updated) // the type never changes on update, like Firefly's split update
             transactions[id] = updated
             log += "update $id ${updated.externalId}"
             return createFireflyResponse(TransactionSingle(read(id, updated)))

@@ -149,6 +149,8 @@ fireflyPlaidConnector2:
       #   samples/market-value-config.sample.yml.
 #      valuation: market
 #      adjustmentThreshold: 1.00
+      # gainLossAccountId: an ASSET offset account (recommended, include in net worth off) makes adjustments transfers
+      #   that budgets and reports ignore; revenue/expense accounts keep the legacy deposit/withdrawal behavior.
 #      gainLossAccountId: 900
 #      gainAccountId: 902
 #      lossAccountId: 901

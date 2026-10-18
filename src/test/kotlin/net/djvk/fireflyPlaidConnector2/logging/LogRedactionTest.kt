@@ -86,19 +86,19 @@ internal class LogRedactionTest {
         val firefly = FakeFirefly()
         firefly.addAccount(1, "Checking")
         firefly.addAccount(2, "Savings")
-        firefly.addAccount(49, "Schwab", opening = "1000")
+        firefly.addAccount(101, "Brokerage", opening = "1000")
         firefly.addAccount(900, "Gains", type = net.djvk.fireflyPlaidConnector2.api.firefly.models.ShortAccountTypeProperty.revenue, role = null)
         val plaid = FakePlaid(clientId = PLAID_CLIENT_ID, secret = PLAID_SECRET)
         plaid.addAccount(BANK_TOKEN, "aaa", 110.0)
         plaid.addAccount(BANK_TOKEN, "bbb", 210.0)
-        plaid.addAccount(BROKER_TOKEN, "schwab-1", 1234.56)
+        plaid.addAccount(BROKER_TOKEN, "brokerage-1", 1234.56)
         plaid.addAccount(ODD_TOKEN, "odd-1", 5.0)
         plaid.transactionsGetJson = this::class.java.classLoader.getResource("plaid/response-get-transactions.json")!!.readText()
 
         val accounts = AccountConfigs(listOf(
             AccountConfig(1, BANK_TOKEN, "aaa"),
             AccountConfig(2, BANK_TOKEN, "bbb"),
-            AccountConfig(49, BROKER_TOKEN, "schwab-1", Valuation.MARKET, gainLossAccountId = 900),
+            AccountConfig(101, BROKER_TOKEN, "brokerage-1", Valuation.MARKET, gainLossAccountId = 900),
             AccountConfig(3, ODD_TOKEN, "odd-1"),
         ))
         val fireflyMock = FireflyMock()
@@ -119,7 +119,7 @@ internal class LogRedactionTest {
         assertThat(events.size).isGreaterThan(5) // DEBUG logging really happened
         assertThat(events.map { it.formattedMessage }).anyMatch { it.contains("token#") } // fingerprints instead of tokens
         assertThat(plaid.requestedPaths).doesNotContain("/accounts/balance/get")
-        assertThat(firefly.transactions.values.map { it.externalId }).anyMatch { it?.startsWith("ffpc-mv-49-") == true }
+        assertThat(firefly.transactions.values.map { it.externalId }).anyMatch { it?.startsWith("ffpc-mv-101-") == true }
         for (e in events) {
             assertNoSecrets(rendered(e))
             // and the masking converter output (what actually reaches the console)

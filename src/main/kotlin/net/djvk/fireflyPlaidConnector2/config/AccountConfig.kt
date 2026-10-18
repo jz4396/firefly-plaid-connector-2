@@ -24,11 +24,11 @@ data class AccountConfig(
     val valuation: Valuation = Valuation.TRANSACTIONS,
     /** Skip the adjustment when |delta| is below this amount. Default: skip only when the delta rounds to 0.00. */
     val adjustmentThreshold: Double? = null,
-    /** Revenue account used for gains (deposit source) and, by name, for losses unless [lossAccountId] is set. */
+    /** Offset for gains and losses. Asset account: adjustments are transfers. Revenue account (legacy): gains are deposits from it and losses go, by name, to an expense account unless [lossAccountId] is set. */
     val gainLossAccountId: Int? = null,
-    /** Optional dedicated revenue account for gains. Overrides [gainLossAccountId] for positive deltas. */
+    /** Optional dedicated offset for gains (asset, or revenue in legacy mode). Overrides [gainLossAccountId] for positive deltas. */
     val gainAccountId: Int? = null,
-    /** Optional dedicated expense account for losses. Overrides [gainLossAccountId] for negative deltas. */
+    /** Optional dedicated offset for losses (asset, or expense in legacy mode). Overrides [gainLossAccountId] for negative deltas. */
     val lossAccountId: Int? = null,
 ) {
     /** Never print the access token. */

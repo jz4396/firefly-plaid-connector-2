@@ -26,10 +26,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Log in to the Container registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -41,19 +41,12 @@ jobs:
 #        with:
 #          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
       - name: Validate Gradle wrapper
         uses: gradle/wrapper-validation-action@f9c9c575b8b21b6485636a91ffecd10e558c62f6
 
-      - name: Build with Gradle
-        uses: gradle/gradle-build-action@ac2d340dc04d9e1113182899e983b5400c17cda1
-        with:
-          arguments: bootBuildImage --imageName=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest --createdDate=now
+      # Build from the hardened, digest-pinned Dockerfile (non-root distroless runtime) instead of bootBuildImage
+      - name: Build image
+        run: docker build --build-arg RUN_TESTS=true -t "$REGISTRY/$IMAGE_NAME:latest" .
 
 #      - name: Build and push Docker image
 #        uses: docker/build-push-action@v3
@@ -72,10 +65,11 @@ jobs:
 #          password: ${{ secrets.DOCKERHUB_TOKEN }}
       
       - name: Push
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          docker image tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          docker image tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
-          docker image push --all-tags ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          docker image tag "$REGISTRY/$IMAGE_NAME:latest" "$REGISTRY/$IMAGE_NAME:$REF_NAME"
+          docker image push --all-tags "$REGISTRY/$IMAGE_NAME"
 
 #          readarray -t y <<<"${{ steps.meta.outputs.tags }}"
 #          for tag in $y; do

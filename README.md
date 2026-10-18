@@ -77,7 +77,7 @@ Some accounts (brokerages, HSAs) get no Plaid transactions, so syncing transacti
 Set `valuation: market` on such an account and, after each sync (batch run or polled cycle), the connector:
 
 1. reads the account's **cached** Plaid balance via `/accounts/get` (free), summing every Plaid account mapped to
-   the same Firefly account (e.g. an HSA that Plaid splits into cash + investment accounts);
+   the same Firefly account (e.g. an investment account that Plaid reports as a cash sweep plus a holdings account);
 2. reads the Firefly balance, excluding today's existing adjustment if there is one;
 3. posts **one** adjustment = Plaid value − Firefly balance against the configured offset account(s).
 
@@ -139,14 +139,14 @@ See [samples/market-value-config.sample.yml](samples/market-value-config.sample.
       valuation: market
       adjustmentThreshold: 1.00
       gainLossAccountId: 900              # ASSET account "Unrealized gains offset", include_net_worth=false
-    - fireflyAccountId: 102               # HSA = cash + investments, summed
+    - fireflyAccountId: 102               # investment account = cash sweep + holdings, summed
       plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000003
-      plaidAccountId: FAKE_HSA_CASH_ACCOUNT_ID
+      plaidAccountId: FAKE_SWEEP_ACCOUNT_ID
       valuation: market
       gainLossAccountId: 900
     - fireflyAccountId: 102
       plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000003
-      plaidAccountId: FAKE_HSA_INVESTMENT_ACCOUNT_ID
+      plaidAccountId: FAKE_HOLDINGS_ACCOUNT_ID
 ```
 
 ## No Paid Plaid Calls

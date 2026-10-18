@@ -32,17 +32,17 @@ fireflyPlaidConnector2:
       gainLossAccountId: 900           # Firefly ASSET account "Unrealized gains offset", include_net_worth=false
                                        #   gain = transfer 900 -> 101, loss = transfer 101 -> 900
 
-    # HSA that Plaid reports as two accounts (cash + investments): map both to ONE Firefly account.
+    # An investment account that Plaid reports as two accounts (cash sweep + holdings): map both to ONE Firefly account.
     # Their balances are summed. Market settings only need to appear on one entry (if repeated they must match).
     # The same asset offset account can be shared by every market-valued account.
     - fireflyAccountId: 102
       plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000003
-      plaidAccountId: FAKE_HSA_CASH_ACCOUNT_ID
+      plaidAccountId: FAKE_SWEEP_ACCOUNT_ID
       valuation: market
       gainLossAccountId: 900
     - fireflyAccountId: 102
       plaidItemAccessToken: access-production-00000000-0000-0000-0000-000000000003
-      plaidAccountId: FAKE_HSA_INVESTMENT_ACCOUNT_ID
+      plaidAccountId: FAKE_HOLDINGS_ACCOUNT_ID
 
     # Alternatives (pick ONE style per market-valued account; mixing account types is a config error):
     #
